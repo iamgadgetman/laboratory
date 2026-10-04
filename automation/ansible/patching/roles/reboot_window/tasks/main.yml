@@ -1,0 +1,253 @@
+---
+# Decide whether this host may reboot right now, do it, then prove it came back.
+
+# Same guard as apt_patch: an unreachable host has no facts and no patch_*
+# results, so every expression below would raise. See apt_patch for why this
+# matters to the reporting play.
+- name: Skip this host when the patch stage did not run
+  ansible.builtin.meta: end_host
+  when: patch_reboot_required is not defined
+
+# The window is one wall-clock hour range for the whole lab, not nine separate
+# ones. This fleet is split across timezones — eagle, falcon, talon, knox and
+# union run UTC while voyager and dilithium run Pacific — so evaluating "is it
+# 03:00 yet?" against each host's own clock means a single timer can never be
+# inside the window everywhere at once. It would reboot the Pacific hosts and
+# report outside_window for the UTC ones every week, which reads as healthy.
+#
+# maintenance_timezone resolves that: the hour is taken in one named zone, on
+# the control host, so the answer is the same for every host and agrees with the
+# timer's OnCalendar by construction. Set it to '' to go back to host-local time.
+- name: Read the current time in the lab's maintenance timezone
+  ansible.builtin.set_fact:
+    # lookup() always runs on the control host, which is the point — one clock,
+    # asked once per host, rather than nine clocks that disagree.
+    window_clock: "{{ lookup('pipe', 'TZ=' ~ maintenance_timezone ~ ' date +%w:%H') }}"
+  when: maintenance_timezone | default('') | length > 0
+
+- name: Evaluate the maintenance window
+  ansible.builtin.set_fact:
+    in_maintenance_window: >-
+      {{ ((window_clock.split(':')[0] | int) in maintenance_window.weekday_numbers
+          and (window_clock.split(':')[1] | int) >= (maintenance_window.start_hour | int)
+          and (window_clock.split(':')[1] | int) <= (maintenance_window.end_hour | int))
+         if (window_clock is defined)
+         else ((ansible_date_time.weekday_number | int) in maintenance_window.weekday_numbers
+               and (ansible_date_time.hour | int) >= (maintenance_window.start_hour | int)
+               and (ansible_date_time.hour | int) <= (maintenance_window.end_hour | int)) }}
+    reboot_vetoed: "{{ 'no_auto_reboot' in group_names }}"
+
+- name: Decide the reboot action
+  ansible.builtin.set_fact:
+    reboot_decision: >-
+      {{ 'not_needed'      if not (patch_reboot_required | bool)
+      else 'deferred_mode' if patch_mode != 'full'
+      else 'rebooting'     if (force_reboot | bool)
+      else 'needs_approval' if (reboot_vetoed | bool) or not (allow_auto_reboot | bool)
+      else 'outside_window' if not (in_maintenance_window | bool)
+      else 'rebooting' }}
+
+- name: Show the decision
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: reboot_required={{ patch_reboot_required }}
+      decision={{ reboot_decision }}
+      window={{ in_maintenance_window }}
+      ({{ window_clock ~ ' ' ~ maintenance_timezone if window_clock is defined
+          else ansible_date_time.weekday ~ ' ' ~ ansible_date_time.time ~ ' host-local' }})
+
+# ── Capture pre-reboot state so we can compare afterwards ────────────────
+- name: Count running containers before reboot
+  ansible.builtin.shell: |
+    set -o pipefail
+    docker ps -q 2>/dev/null | wc -l
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  failed_when: false
+  register: docker_before
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_docker | bool
+    - "'docker_hosts' in group_names"
+
+# ── Reboot ────────────────────────────────────────────────────────────────
+- name: Reboot
+  ansible.builtin.reboot:
+    msg: "Ansible patch run - rebooting to apply {{ patch_reboot_packages | join(', ') | truncate(120) }}"
+    reboot_timeout: "{{ reboot_timeout }}"
+    post_reboot_delay: "{{ post_reboot_settle }}"
+    test_command: "systemctl is-system-running --quiet || true"
+  become: true
+  when: reboot_decision == 'rebooting'
+  register: reboot_result
+
+- name: Re-gather facts after reboot
+  ansible.builtin.setup:
+  when: reboot_decision == 'rebooting'
+
+# ── Health checks ─────────────────────────────────────────────────────────
+# "starting" is not a health verdict, it is "ask again later" — systemd reports
+# it until every unit has been tried, which on a box with a couple of dozen
+# containers outlasts post_reboot_settle comfortably. Asserting against it
+# failed knox for being mid-boot while all 22 of its containers were already up.
+# Wait for the state to resolve, then judge it.
+- name: Check systemd state
+  ansible.builtin.command: systemctl is-system-running
+  changed_when: false
+  failed_when: false
+  register: systemd_state
+  retries: 12
+  delay: 10
+  until: (systemd_state.stdout | default('') | trim) != 'starting'
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_systemd | bool
+
+- name: List failed units
+  ansible.builtin.shell: |
+    set -o pipefail
+    systemctl --failed --no-legend --plain | awk '{print $1}' | tr '\n' ' '
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: systemd_failed
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_systemd | bool
+
+- name: Count running containers after reboot
+  ansible.builtin.shell: |
+    set -o pipefail
+    docker ps -q 2>/dev/null | wc -l
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  failed_when: false
+  register: docker_after
+  retries: 6
+  delay: 15
+  until: >-
+    (docker_after.stdout | default('0') | trim | int)
+    >= (docker_before.stdout | default('0') | trim | int)
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_docker | bool
+    - "'docker_hosts' in group_names"
+
+# ── Swarm nodes are judged on the cluster, not on themselves ─────────────
+# Counting containers is the right check for a standalone Docker host and the
+# wrong one for a Swarm node: while the node is down the scheduler moves its
+# tasks elsewhere and does not move them back, so falcon returned with 4 of its
+# 9 containers and was called unhealthy while every service in the cluster sat
+# at full replicas. What matters after rebooting a Swarm node is that it rejoined
+# and that nothing is left under-replicated — which is also a stronger check,
+# since it catches a service that came back nowhere at all.
+- name: Detect Docker Swarm membership
+  ansible.builtin.command: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}|{{ "{{" }}.Swarm.ControlAvailable{{ "}}" }}'
+  become: true
+  changed_when: false
+  failed_when: false
+  register: swarm_info
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_docker | bool
+    - "'docker_hosts' in group_names"
+
+- name: Wait for Swarm services to converge
+  ansible.builtin.shell: |
+    set -o pipefail
+    docker service ls --format '{{ "{{" }}.Replicas{{ "}}" }}' \
+      | awk -F/ '{ gsub(/ /, "", $1); gsub(/ /, "", $2); if ($1 + 0 < $2 + 0) print }' \
+      | wc -l
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  failed_when: false
+  register: swarm_pending
+  retries: 12
+  delay: 10
+  until: (swarm_pending.stdout | default('1') | trim | int) == 0
+  when:
+    - reboot_decision == 'rebooting'
+    - swarm_info.stdout | default('') is search('^active')
+    - swarm_info.stdout | default('') is search('true$')   # managers can list services
+
+- name: Verify AMP instances came back
+  ansible.builtin.command: ampinstmgr status
+  become: true
+  become_user: "{{ amp_user | default('amp') }}"
+  changed_when: false
+  failed_when: false
+  register: amp_status_post_reboot
+  when:
+    - reboot_decision == 'rebooting'
+    - health_check_amp | bool
+    - "'amp_hosts' in group_names"
+
+- name: Record health results
+  ansible.builtin.set_fact:
+    health:
+      rebooted: "{{ reboot_decision == 'rebooting' }}"
+      systemd: "{{ systemd_state.stdout | default('n/a') | trim }}"
+      failed_units: >-
+        {{ (systemd_failed.stdout | default('') | trim).split()
+           | reject('==', '') | list }}
+      docker_before: "{{ docker_before.stdout | default('0') | trim | int }}"
+      docker_after: "{{ docker_after.stdout | default('0') | trim | int }}"
+      swarm: "{{ 'active' if (swarm_info.stdout | default('') is search('^active')) else 'no' }}"
+      swarm_under_replicated: "{{ swarm_pending.stdout | default('') | trim }}"
+      kernel_before: "{{ patch_kernel_before }}"
+      kernel_after: "{{ ansible_kernel }}"
+
+# Stopping the fleet when a host comes back wrong is the point. Failing the
+# host outright is not: with serial: 1 a hard failure ends the play, and ending
+# the play that way took the reporting play down with it — so the one run you
+# most need a report from produced none, and left the dashboard showing the
+# previous run as current. Rescue it: record why, stop touching further hosts,
+# and let the report and the notification still happen.
+- name: Fail the host when it came back unhealthy
+  block:
+    - name: Assert the host is healthy
+      ansible.builtin.assert:
+        that:
+          - systemd_state.stdout | default('running') | trim in ['running', 'degraded']
+          - (health_fail_on_degraded | bool) is false
+            or systemd_state.stdout | default('running') | trim == 'running'
+          # Container count is only meaningful where this host decides what runs
+          # on it. On a Swarm node the scheduler does, so the cluster is asked
+          # instead — see "Swarm nodes are judged on the cluster" above.
+          - (swarm_info.stdout | default('') is search('^active'))
+            or (docker_after.stdout | default('0') | trim | int)
+               >= (docker_before.stdout | default('0') | trim | int)
+          - (swarm_pending is skipped) or (swarm_pending.stdout | default('1') | trim | int) == 0
+        fail_msg: >-
+          {{ inventory_hostname }} unhealthy after reboot:
+          systemd={{ systemd_state.stdout | default('?') | trim }}
+          failed_units={{ (systemd_failed.stdout | default('') | trim) }}
+          {{ ('swarm services under replicas: ' ~ swarm_pending.stdout | default('?') | trim)
+             if (swarm_info.stdout | default('') is search('^active'))
+             else ('containers ' ~ docker_before.stdout | default('0') | trim ~ ' -> '
+                   ~ docker_after.stdout | default('0') | trim) }}
+      when: reboot_decision == 'rebooting'
+
+  rescue:
+    - name: Record the unhealthy result
+      ansible.builtin.set_fact:
+        health: >-
+          {{ health | combine({'unhealthy': true,
+                               'reason': ansible_failed_result.msg
+                                         | default('health check failed')}) }}
+
+    - name: Stop rebooting the rest of the fleet
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} came back unhealthy — no further hosts will be
+          rebooted in this run. The report is still written.
+
+    - name: End the reboot play
+      ansible.builtin.meta: end_play

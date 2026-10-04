@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  failover:
+    image: python:3.12-slim
+    command: >
+      sh -c "pip install requests pyyaml --quiet &&
+             python /app/failover.py"
+    volumes:
+      - type: bind
+        source: /opt/stacks/failover/failover.py
+        target: /app/failover.py
+        read_only: true
+    configs:
+      - source: failover_config
+        target: /app/config.yml
+    secrets:
+      - cf_api_token
+      - discord_webhook
+    environment:
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cf_api_token
+      DISCORD_WEBHOOK_FILE: /run/secrets/discord_webhook
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == eagle
+      # This service is pinned to eagle and sits on the stack's overlay network,
+      # so on every reboot of eagle Swarm tries to place it before the node has
+      # finished rejoining the cluster and rejects the task with
+      #   "cannot create a swarm scoped network when swarm is not active"
+      # That is transient — it clears within a minute of boot — but with
+      # max_attempts: 5 and a 30s delay the service burned all five retries
+      # inside two and a half minutes and then stayed at 0/1 until someone
+      # redeployed it by hand. It sat down for ten days that way before anyone
+      # noticed. max_attempts: 0 means keep retrying, so the boot race resolves
+      # itself.
+      #
+      # condition: any rather than on-failure because failover.py is a
+      # `while True` watchdog — there is no exit status that should leave the
+      # DNS failover for this lab not running.
+      restart_policy:
+        condition: any
+        delay: 30s
+        max_attempts: 0
+
+configs:
+  failover_config:
+    external: true
+
+secrets:
+  cf_api_token:
+    external: true
+  discord_webhook:
+    external: true

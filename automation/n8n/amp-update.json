@@ -1,0 +1,281 @@
+{
+  "name": "AMP-update",
+  "nodes": [
+    {
+      "parameters": {
+        "command": "echo '<SUDO_PASSWORD>' | sudo -S su - amp -c 'ampinstmgr -p'"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -416
+      ],
+      "name": "update amp1",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "sshPassword": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "SSH 10.20.3.133"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "echo '<SUDO_PASSWORD>' | sudo -S su - amp -c 'ampinstmgr -p'"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -256
+      ],
+      "name": "update amp2",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "sshPassword": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "SSH 10.20.3.138"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "echo '<SUDO_PASSWORD>' | sudo -S su - amp -c 'ampinstmgr -p'"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -64
+      ],
+      "name": "update amp3",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "sshPassword": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "SSH 10.20.3.140"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "echo '<SUDO_PASSWORD>' | sudo -S su - amp -c 'ampinstmgr -p'"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        608,
+        144
+      ],
+      "name": "update amp misfits",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "sshPassword": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "SSH cloud VPS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "echo '<SUDO_PASSWORD>' | sudo -S su - amp -c 'ampinstmgr -p'"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        608,
+        336
+      ],
+      "name": "update amp holodeck",
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "sshPassword": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "SSH holodeck (10.40.3.21)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        32,
+        -416
+      ],
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "Server checked for updates",
+        "options": {},
+        "embeds": {
+          "values": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        -64
+      ],
+      "name": "Discord",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "<N8N_CREDENTIAL_ID>",
+          "name": "Discord webhook"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        48,
+        336
+      ],
+      "name": "When clicking 'Execute workflow'"
+    }
+  ],
+  "connections": {
+    "update amp1": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update amp2": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update amp3": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update amp misfits": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update amp holodeck": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "update amp1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp misfits",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp holodeck",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "update amp1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp misfits",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "update amp holodeck",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

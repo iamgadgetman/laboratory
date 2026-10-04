@@ -1,0 +1,69 @@
+# Core monitoring services on union (Fort). In the lab these are three
+# separate compose projects (~/deploy/prometheus, ~/deploy/grafana,
+# ~/deploy/victorialogs); they are merged here for readability.
+#
+# Every container gets its own address on an existing macvlan network
+# ("18_Net", sanitized to 10.40.2.0/24), so other hosts and both sites
+# reach services directly without published ports.
+#
+# Not shown: Alertmanager (10.40.2.68), the ntfy-bridge (10.40.2.69) and
+# promtail (10.40.2.53) also run on union, but their compose files were not
+# part of the snapshot this repo was built from.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      18_Net:
+        ipv4_address: 10.40.2.42
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.example.net
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}      # <GRAFANA_ADMIN_PASSWORD> in .env
+      # SSO: the reverse proxy forwards the Authentik-authenticated user's
+      # email in a header and Grafana trusts it (auto-creating the user).
+      GF_AUTH_PROXY_ENABLED: "true"
+      GF_AUTH_PROXY_HEADER_NAME: X-authentik-email
+      GF_AUTH_PROXY_HEADER_PROPERTY: email
+      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
+      GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      18_Net:
+        ipv4_address: 10.40.2.31
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:latest
+    container_name: victorialogs
+    restart: unless-stopped
+    command:
+      - -storageDataPath=/vlogs
+      - -retentionPeriod=30d
+    volumes:
+      - vlogs_data:/vlogs
+    networks:
+      18_Net:
+        ipv4_address: 10.40.2.65
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  vlogs_data:
+
+networks:
+  18_Net:
+    external: true

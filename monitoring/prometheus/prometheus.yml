@@ -1,0 +1,220 @@
+# Prometheus - trimmed representative copy of the live config.
+#
+# The live file has ~30 jobs and ~175 targets; this keeps one or two examples
+# of each scrape pattern actually in use. Addresses are sanitized per
+# docs/SANITIZATION.md (Hawk 10.20.0-3.x, Fort 10.40.0-3.x, VPS WireGuard
+# hub 10.99.1.x, router loopbacks 10.255.0.x). Last octets are real.
+#
+# Every target is static. There is no file_sd, Consul or Swarm discovery in
+# the live config - the target list is small enough to read in one sitting.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["10.40.2.68:9093"]     # Alertmanager container on union
+
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
+scrape_configs:
+
+  # --- 1. Plain node_exporter, static targets, friendly instance labels -------
+  # union's own exporter has its own macvlan IP (.47): a macvlan container
+  # (Prometheus) cannot reach its own Docker host, so the host is scraped
+  # through a sibling container instead.
+  - job_name: node
+    static_configs:
+      - targets: ["10.40.2.47:9100"]
+        labels: {instance: union}
+      - targets: ["10.40.2.18:9100"]
+        labels: {instance: knox}
+      - targets: ["10.20.1.8:9100"]
+        labels: {instance: eagle}
+      - targets: ["10.20.1.9:9100"]
+        labels: {instance: falcon}
+      - targets: ["10.20.1.10:9100"]
+        labels: {instance: talon}
+      - targets: ["10.20.1.7:9100"]
+        labels: {instance: omv-hawk}
+      - targets: ["10.99.1.4:9100"]          # cloud VPS, scraped over WireGuard
+        labels: {instance: n8n}
+
+  # --- 2. Firewalls (OPNsense) - node_exporter plugin ------------------------
+  - job_name: opnsense_node
+    static_configs:
+      - targets: ["10.20.3.100:9100"]
+        labels: {instance: hawk-opnsense}
+      - targets: ["10.40.2.100:9100"]
+        labels: {instance: fort-opnsense}
+
+  # --- 3. Netdata in Prometheus format, scraped on the routers' OSPF loopbacks
+  # Loopbacks stay reachable whichever transit path is up.
+  - job_name: netdata
+    metrics_path: /api/v1/allmetrics
+    params:
+      format: [prometheus_all_hosts]
+    honor_labels: true
+    static_configs:
+      - targets: ["10.40.3.19:19999"]
+        labels: {instance: unraid}
+      - targets: ["10.255.0.2:19999"]
+        labels: {instance: halt-opnsense}
+      - targets: ["10.255.0.1:19999"]
+        labels: {instance: stop-opnsense}
+
+  # --- 4. cAdvisor - per-container CPU/memory on every Docker host -----------
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["10.40.2.48:8080"]
+        labels: {instance: union}
+      - targets: ["10.20.1.8:8080"]
+        labels: {instance: eagle}
+      - targets: ["10.20.1.10:8082"]
+        labels: {instance: talon}
+      - targets: ["10.40.3.21:8085"]         # 8080 is taken by the game panel here
+        labels: {instance: holodeck}
+
+  # Docker engine metrics on the Hawk Swarm nodes (dockerd --metrics-addr)
+  - job_name: hawk_docker
+    static_configs:
+      - targets: ["10.20.1.8:9323"]
+        labels: {instance: eagle, site: hawk}
+      - targets: ["10.20.1.9:9323"]
+        labels: {instance: falcon, site: hawk}
+      - targets: ["10.20.1.10:9323"]
+        labels: {instance: talon, site: hawk}
+
+  # --- 5. UPS - apcupsd_exporter, one per site -------------------------------
+  - job_name: ups
+    static_configs:
+      - targets: ["10.40.2.49:9162"]
+        labels: {instance: halt-opnsense}
+      - targets: ["10.40.2.58:9162"]
+        labels: {instance: stop-opnsense}
+
+  # --- 6. Multi-target exporter pattern (one exporter, many databases) -------
+  # The target list holds the database addresses; relabeling moves each one
+  # into ?target= and points the actual scrape at the shared exporter.
+  - job_name: postgres
+    metrics_path: /probe
+    params:
+      auth_module: [nola]
+    static_configs:
+      - targets: ["authentik-postgres:5432"]
+        labels: {server: authentik}
+      - targets: ["netbox-postgres:5432"]
+        labels: {server: netbox}
+      - targets: ["10.40.3.122:5432"]
+        labels: {server: immich}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: nola-postgres-exporter:9187
+
+  # --- 7. Custom exporters I wrote -----------------------------------------
+  # fortgate: the ISP's fiber ONT has no SNMP, so this exporter SSHes in and
+  # converts interface counters to Prometheus format. Slower interval on purpose.
+  - job_name: fortgate
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    static_configs:
+      - targets: ["10.40.2.72:9310"]
+        labels: {instance: fortgate, site: fort}
+
+  # kasa: smart-plug power readings over the plugs' local protocol
+  - job_name: kasa
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    static_configs:
+      - targets: ["10.40.2.73:9311"]
+        labels: {instance: kasa, site: fort}
+
+  # netflow: flow-collector exporter on the probe box
+  - job_name: netflow
+    scrape_interval: 60s
+    scrape_timeout: 45s
+    # NO static `site` label here: the exporter emits its own `site` label
+    # describing the FLOW, and a target label of the same name silently wins,
+    # renaming the real one to `exported_site`.
+    static_configs:
+      - targets: ["10.40.0.18:9502"]
+        labels: {instance: sumner}
+
+  # --- 8. Blackbox ICMP - reachability of every host, from a dedicated probe box
+  - job_name: blackbox_icmp
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    static_configs:
+      - targets: ["10.40.0.100"]
+        labels: {host: halt, site: fort, role: firewall}
+      - targets: ["10.20.3.100"]
+        labels: {host: stop, site: hawk, role: firewall}
+      - targets: ["10.40.0.20"]
+        labels: {host: union, site: fort, role: docker}
+      - targets: ["10.40.2.18"]
+        labels: {host: knox, site: fort, role: proxy}
+      - targets: ["10.20.0.8"]
+        labels: {host: voyager, site: hawk, role: server}
+      - targets: ["10.20.1.8"]
+        labels: {host: eagle, site: hawk, role: swarm}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 10.40.0.18:9115         # blackbox_exporter on sumner
+
+  # --- 9. Blackbox HTTP - every web backend, probed directly (not via the proxy)
+  - job_name: blackbox_http
+    scrape_interval: 60s
+    metrics_path: /probe
+    params:
+      module: [http_any]
+    static_configs:
+      - targets: ["http://10.40.2.30:9000"]
+        labels: {svc: auth}
+      - targets: ["http://10.40.2.31:3000"]
+        labels: {svc: grafana}
+      - targets: ["http://10.40.2.42:9090"]
+        labels: {svc: prometheus}
+      - targets: ["http://10.40.2.41:8000"]
+        labels: {svc: librenms}
+      - targets: ["https://10.20.3.100:5223"]
+        labels: {svc: stop}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 10.40.0.18:9115
+
+  # --- 10. Second probe vantage point -------------------------------------
+  # Some backends only accept traffic from the reverse proxy's address, so the
+  # main probe fleet can't reach them. A second blackbox_exporter on the proxy
+  # host probes those.
+  - job_name: blackbox_http_knox
+    scrape_interval: 60s
+    metrics_path: /probe
+    params:
+      module: [http_any]
+    static_configs:
+      - targets: ["http://10.40.0.16:7681"]
+        labels: {svc: claude}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 10.40.2.18:9115

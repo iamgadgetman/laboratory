@@ -1,0 +1,204 @@
+---
+# Phase 2 of the Hawk Swarm build: install Docker CE (pinned to 27.x), form a
+# three-manager Swarm on eagle/falcon/talon, label the nodes, and drain eagle so
+# it only orchestrates. Idempotent: each init/join is gated on LocalNodeState.
+# Inventory: inventory.yml beside this file. Published as-run (sanitized).
+- name: Phase 2.1 — Install Docker Engine
+  hosts: swarm
+  become: true
+
+  handlers:
+    - name: restart docker
+      service:
+        name: docker
+        state: restarted
+
+  tasks:
+    - name: Install Docker prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: true
+
+    - name: Create Docker GPG keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+        gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Set Docker apt repo architecture fact
+      set_fact:
+        docker_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}"
+
+    - name: Add Docker apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: >
+          deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.gpg]
+          https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Pin Docker major version
+      copy:
+        dest: /etc/apt/preferences.d/docker
+        content: |
+          Package: docker-ce docker-ce-cli
+          Pin: version 5:27.*
+          Pin-Priority: 1001
+
+    - name: Configure Docker daemon
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": { "max-size": "50m", "max-file": "3" },
+            "metrics-addr": "0.0.0.0:9323",
+            "experimental": true,
+            "storage-driver": "overlay2"
+          }
+      notify: restart docker
+
+    - name: Enable and start Docker
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Add ansible user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+
+- name: Phase 2.2 — Initialize Swarm on eagle
+  hosts: eagle
+  become: true
+
+  tasks:
+    - name: Check Swarm state
+      command: docker info --format {% raw %}'{{.Swarm.LocalNodeState}}'{% endraw %}
+      register: swarm_state
+      changed_when: false
+
+    - name: Initialize Swarm
+      command: >
+        docker swarm init
+        --advertise-addr {{ ansible_host }}
+        --listen-addr {{ ansible_host }}:2377
+      when: swarm_state.stdout != 'active'
+
+    - name: Capture manager join token
+      command: docker swarm join-token -q manager
+      register: manager_join_token
+      changed_when: false
+
+    - name: Capture worker join token
+      command: docker swarm join-token -q worker
+      register: worker_join_token
+      changed_when: false
+
+    - name: Share tokens as facts with workers
+      set_fact:
+        swarm_manager_token: "{{ manager_join_token.stdout }}"
+        swarm_worker_token: "{{ worker_join_token.stdout }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['workers'] }}"
+
+
+- name: Phase 2.3 — Join falcon and talon as managers
+  hosts: workers
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Check Swarm state on worker
+      command: docker info --format {% raw %}'{{.Swarm.LocalNodeState}}'{% endraw %}
+      register: node_swarm_state
+      changed_when: false
+
+    - name: Join Swarm as manager
+      command: >
+        docker swarm join
+        --token {{ swarm_manager_token }}
+        10.20.1.10:2377
+        --advertise-addr {{ ansible_host }}
+      when: node_swarm_state.stdout != 'active'
+
+
+- name: Phase 2.4 — Labels, drain eagle, verify cluster
+  hosts: eagle
+  become: true
+
+  tasks:
+    - name: Wait for all nodes to reach Ready state
+      shell: docker node ls --format {% raw %}'{{.Status}}'{% endraw %} | sort -u
+      register: node_statuses
+      until: node_statuses.stdout.strip() == 'Ready'
+      retries: 18
+      delay: 10
+      changed_when: false
+
+    - name: Label eagle
+      command: >
+        docker node update
+        --label-add role=orchestrator
+        --label-add workload=false
+        eagle
+      changed_when: false
+
+    - name: Label falcon
+      command: >
+        docker node update
+        --label-add role=worker
+        --label-add workload=true
+        --label-add location=hawk
+        --label-add traefik=true
+        falcon
+      changed_when: false
+
+    - name: Label talon
+      command: >
+        docker node update
+        --label-add role=worker
+        --label-add workload=true
+        --label-add location=hawk
+        --label-add traefik=true
+        talon
+      changed_when: false
+
+    - name: Drain eagle
+      command: docker node update --availability drain eagle
+      changed_when: false
+
+    - name: Show cluster state
+      command: docker node ls
+      register: cluster_state
+      changed_when: false
+
+    - name: Print cluster state
+      debug:
+        msg: "{{ cluster_state.stdout_lines }}"

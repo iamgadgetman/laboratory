@@ -1,0 +1,4 @@
+*.bak*
+*.sync-conflict-*
+.env
+__pycache__/

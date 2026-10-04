@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly homelab patch + reboot window
+
+[Timer]
+# Must land inside maintenance_window in group_vars/all.yml (Sun 03:00-06:59).
+# Both are read in maintenance_timezone, so this zone and that one have to be
+# the same string — the fleet spans UTC and Pacific hosts and the window is no
+# longer host-local. Check with:
+#   systemd-analyze calendar "Sun *-*-* 03:00 America/Los_Angeles"
+OnCalendar=Sun *-*-* 03:00 America/Los_Angeles
+RandomizedDelaySec=5m
+Persistent=false
+
+[Install]
+WantedBy=timers.target

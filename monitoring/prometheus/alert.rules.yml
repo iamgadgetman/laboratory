@@ -1,0 +1,155 @@
+# Curated subset of the live Prometheus alert rules (sanitized).
+# The comments are the original ones - they record why each threshold is
+# what it is, which is the part worth reading.
+
+groups:
+  - name: infra
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target DOWN: job {{ $labels.job }} / {{ $labels.instance }} has not been scraped for 3m."
+
+      # Percentage AND absolute: a 2TB disk at 12% still has 200GB+ free,
+      # which is not an emergency. Both conditions must hold to page.
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs"} / node_filesystem_size_bytes) * 100 < 10 and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs"} < 20e9
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk CRITICAL on {{ $labels.instance }} {{ $labels.mountpoint }}: under 10% and under 20GB free."
+
+      - alert: DiskSpaceWarning
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs"} / node_filesystem_size_bytes) * 100 < 20 and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs"} < 50e9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk low on {{ $labels.instance }} {{ $labels.mountpoint }}: under 20% and under 50GB free."
+
+      # UPS rules are gated on nominal_power_watts>0 so a non-reporting exporter
+      # (all zeros) cannot fake a page.
+      - alert: UPSOnBattery
+        expr: apcupsd_battery_time_on_seconds > 0 and on(instance) apcupsd_nominal_power_watts > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS {{ $labels.instance }} is ON BATTERY - utility power lost."
+
+      - alert: UPSLowBattery
+        expr: apcupsd_battery_charge_percent < 30 and on(instance) apcupsd_nominal_power_watts > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS {{ $labels.instance }} LOW BATTERY: {{ $value | printf \"%.0f\" }}% charge - shutdown imminent."
+
+      # The inverse case: exporter is up but the UPS link is dead, so every
+      # other UPS rule is silently blind.
+      - alert: UPSNotReporting
+        expr: apcupsd_nominal_power_watts == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS exporter {{ $labels.instance }} is up but reporting all zeros - apcupsd is not communicating with the UPS (monitoring blind)."
+
+      # The ISP fiber ONT drops a CONSTANT ~0.34 pkt/s of VLAN 201 egress
+      # regardless of load - background GPON upstream scheduling.
+      # Absolute count is therefore meaningless; the RATIO is the signal. If
+      # drops start scaling with upload, that is real congestion.
+      # Gated on >200 pps because the constant drop rate alone exceeds 0.5%
+      # below ~68 pps, so an idle link would otherwise page every quiet night.
+      # ignoring(interface) is required - drop is on pon, packets are on pon.201.
+      - alert: FortgateWANDropRatio
+        expr: (rate(fortgate_network_transmit_drop_total{interface="pon"}[15m]) / ignoring(interface) rate(fortgate_network_transmit_packets_total{interface="pon.201"}[15m])) * 100 > 0.5 and rate(fortgate_network_transmit_packets_total{interface="pon.201"}[15m]) > 200
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "fortgate WAN upstream drops at {{ $value | printf \"%.2f\" }}% of transmitted packets for 30m (baseline ~0.04-0.17%) - possible upstream congestion on the GPON circuit."
+
+      # ZFS pool health. Added after a pool sat SUSPENDED for 25h with nobody
+      # alerted: node_exporter's zfs collector exposes dataset I/O counters but
+      # no pool STATE. Fed by a textfile-collector script on the NAS boxes.
+      - alert: ZpoolNotHealthy
+        expr: zpool_health_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is {{ $labels.state }} - not ONLINE."
+
+      # A SUSPENDED pool makes zpool(8) block, so the query times out rather
+      # than returning a bad state. That silence is itself the signal.
+      - alert: ZpoolQueryStuck
+        expr: zpool_status_query_ok == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "zpool(8) on {{ $labels.instance }} is not answering - the pool is likely SUSPENDED and all I/O to it is blocked."
+
+  # ---------------------------------------------------------------------------
+  # Remote site: a friend's small network, reached over a WireGuard tunnel and
+  # read through a custom OPNsense-API exporter (devron_*). Everything here is
+  # severity: warning - it is not my production.
+  #
+  # Deliberately NOT alerted on: wifi latency / ICMP loss. Battery cameras
+  # baseline at 260-920ms with ~5% loss because they power-save hard; a naive
+  # latency rule fires forever. Presence and flapping are the real symptom.
+  # ---------------------------------------------------------------------------
+  - name: remote-site
+    rules:
+      # A client that keeps dropping off and rejoining shows up here even when
+      # it never answers ICMP - which matters, because some clients answer no
+      # pings at all and are invisible to blackbox.
+      - alert: DevronClientFlapping
+        expr: changes(devron_client_present[1h]) > 4
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "devron: {{ $labels.name }} has left and rejoined the network {{ $value | printf \"%.0f\" }} times in the last hour - wifi is dropping it."
+
+      # Holds a lease but stopped answering on the LAN. This is what a silent
+      # wifi deauth looks like from the firewall's side: the lease has not
+      # expired yet (600s) but ARP has already gone cold.
+      - alert: DevronClientSilentOnLan
+        expr: devron_client_in_arp == 0 and on(mac) devron_client_present == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "devron: {{ $labels.name }} still holds a DHCP lease but has dropped out of ARP for 10m - looks like a wifi deauth."
+
+      - alert: DevronFirewallUnreachable
+        expr: probe_success{site="devron", role="firewall"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "devron: firewall {{ $labels.host }} unreachable for 3m - either the site is down or the WG tunnel dropped."
+
+      # The firewall measures this itself against a public resolver. Baseline
+      # is 0.0% at 22ms, so anything sustained above 10% is real.
+      - alert: DevronWanLoss
+        expr: devron_gateway_loss_percent > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "devron: WAN gateway {{ $labels.name }} at {{ $value | printf \"%.1f\" }}% packet loss for 10m (baseline 0.0%)."
+
+      - alert: DevronWgHandshakeStale
+        expr: devron_wg_handshake_age_seconds{peer="fort"} > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "devron: WG handshake with fort is {{ $value | printf \"%.0f\" }}s old (rekey window is 180s) - the tunnel carrying this monitoring is failing."

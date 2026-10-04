@@ -1,0 +1,113 @@
+---
+# Phase 7 of the Hawk Swarm build: deploy the Cloudflare DNS failover watchdog
+# (../../dns-failover/) as a single-replica Swarm service pinned to eagle.
+# Credentials go in as Docker secrets (no_log); config.yml goes in as an
+# immutable Docker config, which is why the stack is torn down before the
+# config object is replaced. Source paths below are relative to the original
+# repo layout (scripts/dns-failover, stacks/failover).
+# cf_api_token / discord_webhook come from an Ansible Vault vars file.
+- name: Phase 7 — Deploy DNS failover service
+  hosts: eagle
+  become: true
+
+  tasks:
+    - name: Create failover stack directory on eagle
+      file:
+        path: /opt/stacks/failover
+        state: directory
+        mode: "0755"
+
+    - name: Distribute failover script, config, and stack file to eagle
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - src: "{{ playbook_dir }}/../scripts/dns-failover/failover.py"
+          dest: /opt/stacks/failover/failover.py
+          mode: "0755"
+        - src: "{{ playbook_dir }}/../scripts/dns-failover/config.yml"
+          dest: /opt/stacks/failover/config.yml
+          mode: "0644"
+        - src: "{{ playbook_dir }}/../stacks/failover/docker-stack.yml"
+          dest: /opt/stacks/failover/docker-stack.yml
+          mode: "0644"
+
+    - name: Check existing Docker secrets
+      command: docker secret ls --format {% raw %}'{{.Name}}'{% endraw %}
+      register: existing_secrets
+      changed_when: false
+
+    - name: Create cf_api_token secret
+      shell: echo -n "{{ cf_api_token }}" | docker secret create cf_api_token -
+      when: "'cf_api_token' not in existing_secrets.stdout_lines"
+      no_log: true
+
+    - name: Create discord_webhook secret
+      shell: echo -n "{{ discord_webhook }}" | docker secret create discord_webhook -
+      when: "'discord_webhook' not in existing_secrets.stdout_lines"
+      no_log: true
+
+    - name: Check existing Docker configs
+      command: docker config ls --format {% raw %}'{{.Name}}'{% endraw %}
+      register: existing_configs
+      changed_when: false
+
+    - name: Remove failover stack before updating config (config is immutable while in use)
+      command: docker stack rm failover
+      when: "'failover_config' in existing_configs.stdout_lines"
+      ignore_errors: true
+
+    - name: Wait for failover stack services to stop
+      command: docker service ls --filter name=failover_failover --format {% raw %}'{{.Name}}'{% endraw %}
+      register: svc_check
+      until: svc_check.stdout == ""
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: "'failover_config' in existing_configs.stdout_lines"
+
+    - name: Wait for failover_default network to be removed
+      command: docker network ls --filter name=failover_default --format {% raw %}'{{.Name}}'{% endraw %}
+      register: net_check
+      until: net_check.stdout == ""
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: "'failover_config' in existing_configs.stdout_lines"
+
+    - name: Remove stale failover_config
+      command: docker config rm failover_config
+      when: "'failover_config' in existing_configs.stdout_lines"
+      ignore_errors: true
+
+    - name: Create failover_config Docker Config
+      command: docker config create failover_config /opt/stacks/failover/config.yml
+
+    - name: Deploy failover stack
+      command: >
+        docker stack deploy
+        --compose-file /opt/stacks/failover/docker-stack.yml
+        --with-registry-auth
+        failover
+
+    - name: Wait for failover service to start
+      command: >
+        docker service ps failover_failover
+        --format {% raw %}'{{.CurrentState}}'{% endraw %}
+        --filter desired-state=running
+      register: failover_state
+      until: "'Running' in failover_state.stdout"
+      retries: 20
+      delay: 10
+      changed_when: false
+
+    - name: Check failover log (first 10 lines)
+      command: docker service logs --tail 10 failover_failover
+      register: failover_log
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show failover log
+      debug:
+        msg: "{{ failover_log.stderr_lines | default([]) + failover_log.stdout_lines | default([]) }}"

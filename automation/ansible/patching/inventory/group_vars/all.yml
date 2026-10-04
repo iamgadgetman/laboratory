@@ -1,0 +1,88 @@
+---
+# ─────────────────────────────────────────────────────────────────────────
+# Global patching behaviour. Override per-group in group_vars/<group>.yml
+# or per-host in host_vars/<host>.yml.
+# ─────────────────────────────────────────────────────────────────────────
+
+# audit  = report only, change nothing (safe, default)
+# patch  = apt update + upgrade, no reboots
+# full   = patch + reboot when required and inside the maintenance window
+patch_mode: audit
+
+# apt upgrade flavour: "safe" (apt-get upgrade) | "full" (apt-get dist-upgrade)
+# "full" is what you want on Ubuntu servers — it lets new kernel metapackages in.
+apt_upgrade_type: full
+
+apt_autoremove: true
+apt_autoclean: true
+apt_cache_valid_time: 1800
+apt_lock_timeout: 300          # wait out unattended-upgrades instead of failing
+
+# Packages never to upgrade automatically (put kernel/driver pins here).
+apt_hold_packages: []
+
+# ── Pre-flight free space ────────────────────────────────────────────────
+# Absolute, because a kernel upgrade needs megabytes rather than a percentage.
+# The old 85%-full rule refused to patch a 1.9 TB disk with 239 GB free while
+# still passing a 512 MB /boot with 76 MB left. boot_min_free_mb applies only
+# when /boot is its own filesystem; otherwise root_min_free_mb covers both.
+boot_min_free_mb: 512
+root_min_free_mb: 5120
+
+# ── Maintenance window ───────────────────────────────────────────────────
+# One wall-clock range for the whole lab, read in this timezone on the control
+# host. That matters here: eagle, falcon, talon, knox and union run UTC while
+# voyager and dilithium run Pacific, so "03:00 host-local" is two different
+# moments seven hours apart and no single timer can be inside both. It must also
+# match OnCalendar in systemd/user/nola-patch-full.timer.
+# Set to '' to fall back to each host's own clock.
+maintenance_timezone: America/Los_Angeles
+# weekday_numbers: 0=Sunday .. 6=Saturday
+maintenance_window:
+  weekday_numbers: [0]         # Sunday
+  start_hour: 3                # 03:00
+  end_hour: 6                  # inclusive, so the window closes at 06:59
+# Set true on the command line to bypass the window: -e force_reboot=true
+force_reboot: false
+
+# Base default. ubuntu_servers flips this on; membership in the
+# no_auto_reboot group is a hard veto regardless of this value.
+allow_auto_reboot: false
+
+# AMP handling is off unless the host is in amp_hosts.
+amp_manage: false
+
+# ── Reboot behaviour ─────────────────────────────────────────────────────
+reboot_timeout: 900            # seconds to wait for the host to come back
+post_reboot_settle: 45         # seconds to let services start before health checks
+reboot_serial: 1               # reboot this many hosts at a time
+
+# ── Health checks after a reboot ─────────────────────────────────────────
+health_check_systemd: true
+health_check_docker: true      # only runs on hosts in docker_hosts
+health_check_amp: true         # only runs on hosts in amp_hosts
+# Treat "degraded" systemd as a warning, not a failure. Homelabs are degraded.
+health_fail_on_degraded: false
+
+# ── Reporting ────────────────────────────────────────────────────────────
+report_dir: "{{ playbook_dir }}/../reports"
+
+# ── Notification ─────────────────────────────────────────────────────────
+# Discord webhook (or ntfy topic URL, or anything that takes a POST).
+#
+# The URL is NOT stored here. It is read from the DISCORD_WEBHOOK_URL
+# environment variable on the control host, which NOLA's .env on union already
+# defines — so there is exactly one copy of the secret and nothing to commit.
+#
+# lookup('env', ...) returns '' when unset, and the notify tasks are gated on
+# `notify_webhook_url | length > 0`, so an unset variable silently skips
+# notification rather than failing the run.
+#
+# To override with a vault instead, convert group_vars/all.yml into the
+# directory form (see README) and set vault_notify_webhook_url there; the
+# default() below will prefer it.
+notify_webhook_url: >-
+  {{ vault_notify_webhook_url
+     | default(lookup('env', 'DISCORD_WEBHOOK_URL'), true) }}
+notify_webhook_type: discord   # discord | ntfy | generic
+notify_on: always              # always | changes | failures

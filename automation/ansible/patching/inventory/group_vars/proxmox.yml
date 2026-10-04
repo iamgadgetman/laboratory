@@ -1,0 +1,7 @@
+---
+# Proxmox: safe upgrades only. dist-upgrade on PVE can pull kernel/ceph
+# changes you want to eyeball first.
+apt_upgrade_type: safe
+allow_auto_reboot: false
+apt_autoremove: false
+amp_manage: false

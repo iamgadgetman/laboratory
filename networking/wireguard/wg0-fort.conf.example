@@ -1,0 +1,28 @@
+# wg0 on the Fort edge (halt) — wg-quick equivalent of the OPNsense GUI config.
+# OPNsense: VPN > WireGuard > Instances / Peers. Sanitized; keys are placeholders.
+
+[Interface]
+# Transit /29 to Hawk + host address on the VPS/satellite hub network
+Address    = 10.99.0.2/29, 10.99.1.2/32
+ListenPort = 51820
+MTU        = 1420
+PrivateKey = <FORT_WG_PRIVATE_KEY>
+# Routes are owned by FRR/OSPF, not wg-quick:
+Table      = off
+
+[Peer]
+# Hawk House edge (stop)
+PublicKey           = <HAWK_WG_PUBLIC_KEY>
+Endpoint            = 198.51.100.20:51820   # hawk.example.net
+# Far-side transit address, loopback, and its four /24s — cryptokey routing
+# drops anything OSPF points at wg0 that isn't listed here.
+AllowedIPs          = 10.99.0.1/32, 10.255.0.1/32, 10.99.1.1/32,
+                      10.20.0.0/24, 10.20.1.0/24, 10.20.2.0/24, 10.20.3.0/24
+PersistentKeepalive = 25                     # Fort is behind NAT
+
+[Peer]
+# Cloud VPS (public anchor, WireGuard hub for satellites)
+PublicKey           = <VPS_WG_PUBLIC_KEY>
+Endpoint            = 192.0.2.50:51820
+AllowedIPs          = 10.99.1.10/32      # illustrative hub address
+PersistentKeepalive = 25

@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily homelab patch audit
+
+[Timer]
+# Explicit zone: union runs on UTC, and a report timestamped 09:00 that actually
+# ran at 02:00 local is how you end up distrusting the dashboard.
+OnCalendar=*-*-* 07:00 America/Los_Angeles
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,176 @@
+---
+# Published roles: apt_patch, reboot_window. The amp_update (CubeCoders AMP
+# getamp + ampinstmgr flow) and collect_report (per-host JSON) roles are
+# referenced here but omitted from this portfolio copy for length.
+# ─────────────────────────────────────────────────────────────────────────
+#  Homelab patch run
+#
+#  ansible-playbook playbooks/patch.yml                          # audit
+#  ansible-playbook playbooks/patch.yml -e patch_mode=patch      # apt only
+#  ansible-playbook playbooks/patch.yml -e patch_mode=full       # + reboots
+#  ansible-playbook playbooks/patch.yml -l knox -e patch_mode=full -e force_reboot=true
+# ─────────────────────────────────────────────────────────────────────────
+
+- name: Reset previous run artifacts
+  hosts: localhost
+  gather_facts: true
+  become: false
+  tasks:
+    - name: Clear per-host reports
+      ansible.builtin.file:
+        path: "{{ report_dir }}/hosts"
+        state: absent
+
+    - name: Recreate the report directory
+      ansible.builtin.file:
+        path: "{{ report_dir }}/hosts"
+        state: directory
+        mode: "0755"
+
+    - name: Stamp the run
+      ansible.builtin.set_fact:
+        run_started: "{{ ansible_date_time.iso8601 }}"
+
+- name: Patch packages
+  hosts: "{{ target | default('ubuntu_servers:amp_hosts:proxmox') }}"
+  gather_facts: true
+  ignore_unreachable: true
+  serial: "{{ patch_serial | default('100%') }}"
+  max_fail_percentage: 100
+  pre_tasks:
+    # build_report.py fills in a document for every "expected" host so a host
+    # that vanished is reported rather than silently dropped. Expected has to
+    # mean "what this run targeted", not the whole inventory — otherwise a
+    # --limit run marks every host it was never asked about as unreachable.
+    # ansible_play_hosts_all is exactly that list, including hosts that failed.
+    - name: Record which hosts this run targeted
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/.expected"
+        mode: "0644"
+        content: "{{ ansible_play_hosts_all | join(',') }}"
+      delegate_to: localhost
+      run_once: true
+      become: false
+  roles:
+    - role: apt_patch
+
+- name: Update CubeCoders AMP
+  hosts: "{{ target | default('amp_hosts') }}"
+  gather_facts: false
+  ignore_unreachable: true
+  serial: 1
+  tasks:
+    # See the rescue in roles/apt_patch: a host that already failed there has
+    # its reason recorded and must not be retried here. holodeck is the only
+    # amp_host, so letting it fail in this play takes the whole run down.
+    - name: Skip hosts that dropped out of the patch play
+      ansible.builtin.meta: end_host
+      when: patch_dropped | default(false) | bool
+
+    - name: Run the AMP update flow
+      ansible.builtin.include_role:
+        name: amp_update
+      when: amp_manage | default(false) | bool
+
+- name: Reboot where required, one host at a time
+  hosts: "{{ target | default('ubuntu_servers:amp_hosts:proxmox') }}"
+  gather_facts: false
+  ignore_unreachable: true
+  serial: "{{ reboot_serial | default(1) }}"
+  roles:
+    - role: reboot_window
+
+- name: Collect per-host results
+  hosts: "{{ target | default('ubuntu_servers:amp_hosts:proxmox') }}"
+  gather_facts: false
+  ignore_unreachable: true
+  become: false
+  roles:
+    - role: collect_report
+
+- name: Build the report and notify
+  hosts: localhost
+  gather_facts: true
+  become: false
+  vars:
+    expected_hosts: >-
+      {{ groups[(target | default('all'))] | default(ansible_play_hosts_all) }}
+  tasks:
+    - name: Aggregate host documents into reports/latest.json
+      ansible.builtin.command: >-
+        {{ ansible_python_interpreter | default('python3') }}
+        {{ playbook_dir }}/../bin/build_report.py
+        --hosts-dir {{ report_dir }}/hosts
+        --out {{ report_dir }}/latest.json
+        --html {{ report_dir }}/patch-status.html
+        --history {{ report_dir }}/history.jsonl
+        --mode {{ patch_mode }}
+        --expected "{{ lookup('file', report_dir + '/.expected', errors='ignore')
+                       | default(((groups['ubuntu_servers'] | default([]))
+                                  + (groups['amp_hosts'] | default([]))
+                                  + (groups['proxmox'] | default([]))) | unique | join(','), true) }}"
+      changed_when: true
+      register: report_build
+
+    - name: Show the summary
+      ansible.builtin.debug:
+        msg: "{{ report_build.stdout_lines }}"
+
+    - name: Load the summary for notification
+      ansible.builtin.set_fact:
+        summary: "{{ (lookup('file', report_dir + '/latest.json') | from_json).summary }}"
+
+    - name: Notify Discord
+      ansible.builtin.uri:
+        url: "{{ notify_webhook_url }}"
+        method: POST
+        body_format: json
+        status_code: [200, 204]
+        body:
+          username: "NOLA Patch Manager"
+          embeds:
+            - title: "Patch run - {{ patch_mode }} mode"
+              color: >-
+                {{ 15158332 if summary.failed > 0
+                else 16776960 if summary.reboot_pending > 0
+                else 3066993 }}
+              description: >-
+                **{{ summary.total }}** hosts checked -
+                **{{ summary.updated }}** updated,
+                **{{ summary.reboot_pending }}** awaiting reboot,
+                **{{ summary.failed }}** failed,
+                **{{ summary.unreachable }}** unreachable
+              fields: "{{ summary.discord_fields }}"
+              footer:
+                text: "{{ ansible_date_time.iso8601 }}"
+      when:
+        - notify_webhook_url | length > 0
+        - notify_webhook_type == 'discord'
+        - notify_on == 'always'
+          or (notify_on == 'changes' and (summary.updated | int > 0 or summary.failed | int > 0))
+          or (notify_on == 'failures' and summary.failed | int > 0)
+
+    - name: Notify ntfy
+      ansible.builtin.uri:
+        url: "{{ notify_webhook_url }}"
+        method: POST
+        headers:
+          Title: "Patch run ({{ patch_mode }}): {{ summary.updated }} updated, {{ summary.reboot_pending }} need reboot"
+          Priority: "{{ 'high' if summary.failed | int > 0 else 'default' }}"
+          Tags: "{{ 'rotating_light' if summary.failed | int > 0 else 'white_check_mark' }}"
+        body: "{{ summary.text }}"
+        status_code: [200, 204]
+      when:
+        - notify_webhook_url | length > 0
+        - notify_webhook_type == 'ntfy'
+
+    - name: Notify generic webhook
+      ansible.builtin.uri:
+        url: "{{ notify_webhook_url }}"
+        method: POST
+        body_format: json
+        body: "{{ summary }}"
+        status_code: [200, 201, 202, 204]
+      when:
+        - notify_webhook_url | length > 0
+        - notify_webhook_type == 'generic'

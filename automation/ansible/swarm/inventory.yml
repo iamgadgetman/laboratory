@@ -1,0 +1,39 @@
+# Swarm inventory for the Hawk "birds" — three Ubuntu nodes, all managers
+# (odd-sized manager quorum survives one node loss). eagle is drained of
+# workloads and acts as orchestrator; falcon and talon carry services.
+all:
+  children:
+    swarm:
+      children:
+        managers:
+          hosts:
+            eagle:
+              ansible_host: 10.20.1.8
+              swarm_role: manager
+              node_drain: true
+              node_labels:
+                role: orchestrator
+                workload: "false"
+            falcon:
+              ansible_host: 10.20.1.9
+              swarm_role: manager
+              node_drain: false
+              node_labels:
+                role: worker
+                workload: "true"
+                location: hawk
+                traefik: "true"
+            talon:
+              ansible_host: 10.20.1.10
+              swarm_role: manager
+              node_drain: false
+              node_labels:
+                role: worker
+                workload: "true"
+                location: hawk
+                traefik: "true"
+        # "workers" is the join group in 01-docker-swarm.yml; both join as managers.
+        workers:
+          hosts:
+            falcon:
+            talon:

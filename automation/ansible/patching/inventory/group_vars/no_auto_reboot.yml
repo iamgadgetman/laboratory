@@ -1,0 +1,6 @@
+---
+# Membership in this group is a hard veto on unattended reboots.
+# The priority makes this win over ubuntu_servers.yml when a host is in both;
+# the reboot role also checks group membership directly as a second guard.
+ansible_group_priority: 100
+allow_auto_reboot: false

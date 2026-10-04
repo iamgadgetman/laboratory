@@ -1,0 +1,12 @@
+[Unit]
+Description=Homelab patch run (upgrade + reboot inside the maintenance window)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/homelab-patching
+# See nola-patch-audit.service — without this the unattended run notifies nobody.
+ExecStart=/bin/bash -c 'export DISCORD_WEBHOOK_URL="$(sed -n "s/^DISCORD_WEBHOOK_URL=//p" %h/nola/.env | head -1)"; exec %h/homelab-patching/bin/nola-patch.sh full'
+TimeoutStartSec=4h
+Nice=10

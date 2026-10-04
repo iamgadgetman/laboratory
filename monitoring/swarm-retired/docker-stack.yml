@@ -1,0 +1,126 @@
+# RETIRED - the original Hawk Docker Swarm monitoring stack (eagle/falcon/talon).
+#
+# Deployed by an Ansible playbook (configs copied to every node, Grafana admin
+# password created as a Docker secret from Ansible Vault, then
+# `docker stack deploy`). Prometheus, Grafana and Loki from this stack were
+# removed in 2026-08 when monitoring was consolidated onto a single
+# Prometheus/Grafana on union; their Hawk scrape jobs were folded into that
+# config. Kept as an example of the Swarm version. Sanitized.
+
+version: "3.9"
+
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - /opt/stacks/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /mnt/nfs/prometheus:/prometheus
+    networks:
+      - monitoring
+      - proxy-internal
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.nfs == true
+          - node.labels.workload == true
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SERVER_ROOT_URL: "https://grafanahawk.example.net"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_pass
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      GF_ALERTING_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    secrets:
+      - grafana_admin_pass
+    volumes:
+      - /opt/stacks/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /opt/stacks/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - /mnt/nfs/grafana:/var/lib/grafana
+    networks:
+      - monitoring
+      - proxy-internal
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.nfs == true
+          - node.labels.workload == true
+
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/loki.yml
+    configs:
+      - source: loki_config
+        target: /etc/loki/loki.yml
+    volumes:
+      - /mnt/nfs/loki:/loki
+    networks:
+      - monitoring
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.nfs == true
+          - node.labels.workload == true
+
+  promtail:
+    image: grafana/promtail:latest
+    command: -config.file=/etc/promtail/promtail.yml
+    user: root
+    configs:
+      - source: promtail_config
+        target: /etc/promtail/promtail.yml
+    volumes:
+      - /var/log/traefik:/var/log/traefik:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - monitoring
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.labels.workload == true
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - target: 9100
+        published: 9100
+        mode: host
+    deploy:
+      mode: global
+
+networks:
+  monitoring:
+    external: true
+  proxy-internal:
+    external: true
+
+secrets:
+  grafana_admin_pass:
+    external: true
+
+configs:
+  loki_config:
+    file: /opt/stacks/monitoring/loki.yml
+  promtail_config:
+    file: /opt/stacks/monitoring/promtail.yml

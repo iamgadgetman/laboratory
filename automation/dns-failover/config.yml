@@ -1,0 +1,34 @@
+# DNS failover watchdog — runs as a single-replica Swarm service pinned to eagle.
+# Delivered to the container as an immutable Docker config (failover_config),
+# so changing a value means creating a new config object and rotating it in.
+#
+# Sanitized: public IPs are RFC 5737, zone ID and hostnames are placeholders.
+
+hawk_public_ip: "198.51.100.20"     # primary site (Hawk)
+fort_public_ip: "203.0.113.10"      # standby site (Fort) — dynamic WAN, keep in sync
+cloudflare_zone_id: "<CLOUDFLARE_ZONE_ID>"
+
+# Both checks must pass for a "healthy" tick:
+#   wan_check_url      — can this site reach the internet at all?
+#   internal_check_url — is the Swarm ingress (Traefik /ping on talon) answering?
+wan_check_url: "https://one.one.one.one/cdn-cgi/trace"
+internal_check_url: "http://10.20.1.10:8080/ping"
+health_check_timeout_seconds: 5
+check_interval_seconds: 60
+
+failure_threshold: 5       # consecutive failures before FAILED_OVER
+recovery_threshold: 3      # consecutive successes before back to HEALTHY
+
+dns_ttl: 60
+
+state_file: "/var/run/dns-failover/state.json"
+
+# CF_DNS_API_TOKEN and DISCORD_WEBHOOK are read from Docker Secrets:
+#   /run/secrets/cf_api_token
+#   /run/secrets/discord_webhook
+
+failover_hostnames:
+  # hawk.example.net and fort.example.net are DDNS-managed — do NOT add them.
+  - "whoami.example.net"
+  - "grafanahawk.example.net"
+  - "promhawk.example.net"

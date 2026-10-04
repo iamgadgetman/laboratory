@@ -1,0 +1,15 @@
+[Unit]
+Description=Homelab patch audit (report only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/homelab-patching
+# A user unit gets no /etc/default and no login shell, so the webhook has to be
+# fetched here or the run notifies nobody. It is read out of NOLA's .env at run
+# time rather than copied, so rotating it there is still the only edit needed.
+ExecStart=/bin/bash -c 'export DISCORD_WEBHOOK_URL="$(sed -n "s/^DISCORD_WEBHOOK_URL=//p" %h/nola/.env | head -1)"; exec %h/homelab-patching/bin/nola-patch.sh audit'
+TimeoutStartSec=1h
+Nice=10
+IOSchedulingClass=idle

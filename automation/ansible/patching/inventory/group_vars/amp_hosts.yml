@@ -1,0 +1,34 @@
+---
+# CubeCoders AMP hosts.
+#
+# Update model per CubeCoders docs:
+#   as root:      getamp update        → updates the repo + ampinstmgr package
+#   as amp user:  ampinstmgr upgradeall → upgrades every instance, restarting
+#                                          any that were running
+amp_manage: true
+
+# The OS user AMP runs as. Default on Linux installs is "amp".
+amp_user: amp
+
+# Refresh the CubeCoders apt repo definition before updating (idempotent).
+amp_add_repo: false
+
+# Upgrade AMP instances, not just the instance manager.
+amp_upgrade_instances: true
+
+# Pass "true" so running instances are restarted after upgrade (AMP default).
+amp_restart_running: true
+
+# Seconds to wait after upgradeall before re-checking instance health.
+amp_settle_seconds: 60
+
+# Optional shell hooks, run as the amp user. Use these to warn players,
+# save worlds, or take a backup. Leave empty to skip.
+# Example (Minecraft via AMP's API bridge, adjust to your setup):
+#   amp_pre_update_command: 'ampinstmgr APIcall Minecraft01 Core/SendConsoleMessage "say Restarting in 60s" && sleep 60'
+amp_pre_update_command: ""
+amp_post_update_command: ""
+
+# Never reboot an AMP box automatically — players get dropped.
+# Reboots are reported and left for a human (or -e force_reboot=true).
+allow_auto_reboot: false

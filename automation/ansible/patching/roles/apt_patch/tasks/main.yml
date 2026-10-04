@@ -1,0 +1,253 @@
+---
+# ── Bail out cleanly on hosts we could not reach ───────────────────────────
+# ignore_unreachable keeps an unreachable host in the play, and tasks that run
+# on the controller (set_fact) still execute for it — blowing up on undefined
+# facts and marking the host "failed" rather than "unreachable". Worse, when
+# every managed host fails Ansible stops the whole playbook ("NO MORE HOSTS
+# LEFT") and the reporting play never runs, so you get no report at all.
+# Ending the host here leaves no per-host document, and build_report.py's
+# --expected fill records it as unreachable.
+- name: Skip this host when fact gathering did not succeed
+  ansible.builtin.meta: end_host
+  when: ansible_kernel is not defined
+
+# ── Pre-flight facts ──────────────────────────────────────────────────────
+- name: Record kernel and uptime before patching
+  ansible.builtin.set_fact:
+    # set_fact executes on the controller, so it still runs for a host whose
+    # fact gathering was skipped by ignore_unreachable. Without the default it
+    # raises a hard "ansible_kernel is undefined" failure and an unreachable
+    # host is reported as failed instead of unreachable.
+    patch_kernel_before: "{{ ansible_kernel | default('?') }}"
+    patch_uptime_before: "{{ ansible_uptime_seconds | default(0) }}"
+
+- name: Check disk space on /boot and /
+  ansible.builtin.shell: |
+    set -o pipefail
+    df -P /boot / 2>/dev/null | awk 'NR>1 {print $6"="$5}' | tr '\n' ' '
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: patch_disk_raw
+
+# A kernel upgrade needs *room*, which is an absolute quantity, not a share of
+# the disk. The old check aborted at 85% full and so refused to patch dilithium,
+# which had 239 GB free — 15% of a 1.9 TB disk is 285 GB, an amount no kernel
+# will ever need. Meanwhile the same 85% on a 512 MB /boot leaves 76 MB, which
+# is not enough. The percentage was wrong in both directions; free megabytes are
+# the thing that actually determines whether the upgrade fits.
+#
+# Line 1 is free MB, line 2 is the mount point — /boot when it is its own
+# filesystem, / when it is not, which is what decides the floor to apply.
+- name: Measure free space where a kernel upgrade would land
+  ansible.builtin.shell: |
+    set -o pipefail
+    df -P -BM /boot 2>/dev/null | awk 'NR>1 {gsub("M","",$4); print $4+0; print $6}'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  register: patch_boot_df
+
+- name: Measure free space on the root filesystem
+  ansible.builtin.shell: |
+    set -o pipefail
+    df -P -BM / 2>/dev/null | awk 'NR>1 {gsub("M","",$4); print $4+0}'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  register: patch_root_df
+
+- name: Record the free-space facts
+  ansible.builtin.set_fact:
+    patch_boot_free_mb: "{{ (patch_boot_df.stdout_lines | default(['0']))[0] | default(0) | int }}"
+    patch_boot_separate: "{{ (patch_boot_df.stdout_lines | default(['0', '/']))[1] | default('/') == '/boot' }}"
+    patch_root_free_mb: "{{ patch_root_df.stdout | default('0') | trim | int }}"
+
+- name: Abort when there is not enough free space for a kernel upgrade
+  ansible.builtin.assert:
+    that:
+      - not (patch_boot_separate | bool)
+        or (patch_boot_free_mb | int) >= (boot_min_free_mb | int)
+      - (patch_root_free_mb | int) >= (root_min_free_mb | int)
+    fail_msg: >-
+      {{ inventory_hostname }} does not have room to patch safely:
+      {{ '/boot has ' ~ patch_boot_free_mb ~ ' MB free (need ' ~ boot_min_free_mb ~ ')'
+         if (patch_boot_separate | bool)
+         else '/boot is on the root filesystem' }},
+      / has {{ patch_root_free_mb }} MB free (need {{ root_min_free_mb }}).
+      {{ 'Clean old kernels: sudo apt-get autoremove --purge'
+         if (patch_boot_separate | bool) and (patch_boot_free_mb | int) < (boot_min_free_mb | int)
+         else 'This is the root filesystem, so old kernels are unlikely to be the cause — check df -h / first.' }}
+  when: patch_mode != 'audit'
+
+# ── Refresh package index ─────────────────────────────────────────────────
+# This is the first task that needs root, so it is where a host without the
+# patchbot sudoers rule drops out. Left alone, such a host produces no document
+# and build_report.py's --expected fill calls it "unreachable" — which is wrong
+# and sends you looking at the network instead of at /etc/sudoers.d. The rescue
+# writes a real document saying what actually happened.
+- name: Refresh the package index
+  block:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+        lock_timeout: "{{ apt_lock_timeout }}"
+      become: true
+      register: patch_cache
+      retries: 3
+      delay: 20
+      until: patch_cache is succeeded
+
+  rescue:
+    - name: Record why this host dropped out
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/hosts/{{ inventory_hostname }}.json"
+        mode: "0644"
+        content: "{{ failed_report | to_nice_json }}"
+      delegate_to: localhost
+      become: false
+      vars:
+        failed_report:
+          host: "{{ inventory_hostname }}"
+          address: "{{ ansible_host | default(inventory_hostname) }}"
+          groups: "{{ group_names }}"
+          os: "{{ ansible_distribution | default('?') }} {{ ansible_distribution_version | default('') }}"
+          kernel_before: "{{ patch_kernel_before | default('?') }}"
+          kernel_after: "{{ ansible_kernel | default('?') }}"
+          mode: "{{ patch_mode }}"
+          pending: []
+          pending_count: 0
+          security_count: 0
+          upgraded: false
+          reboot_required: false
+          reboot_packages: []
+          reboot_decision: "failed"
+          in_window: false
+          health: {}
+          amp: {}
+          status: "failed"
+          error: >-
+            {{ ansible_failed_result.msg | default('apt cache update failed') }}
+
+    # end_host only ends the *current* play. Without this fact the host walks
+    # straight into the AMP and reboot plays and fails there for the same
+    # reason — and when it is the only host in one of those plays, Ansible
+    # stops the entire run with "NO MORE HOSTS LEFT" before the reporting play
+    # gets to write anything. A dropped host has to stay dropped.
+    - name: Mark this host as dropped for the remaining plays
+      ansible.builtin.set_fact:
+        patch_dropped: true
+
+    - name: Stop processing this host
+      ansible.builtin.meta: end_host
+
+# ── What would change? (runs in every mode, including audit) ──────────────
+- name: Simulate the upgrade to enumerate pending packages
+  ansible.builtin.shell: |
+    set -o pipefail
+    DEBIAN_FRONTEND=noninteractive apt-get -q -y --just-print \
+      {{ 'dist-upgrade' if apt_upgrade_type == 'full' else 'upgrade' }} \
+      2>/dev/null | grep -E '^(Inst|Conf) ' || true
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  register: patch_simulate
+
+- name: Parse pending upgrades
+  ansible.builtin.set_fact:
+    patch_pending: >-
+      {{ patch_simulate.stdout_lines
+         | select('match', '^Inst ')
+         | map('regex_replace', '^Inst ([^ ]+) .*$', '\1')
+         | list }}
+    patch_pending_security: >-
+      {{ patch_simulate.stdout_lines
+         | select('match', '^Inst ')
+         | select('search', '-security|Ubuntu-Security|Debian-Security')
+         | map('regex_replace', '^Inst ([^ ]+) .*$', '\1')
+         | list }}
+
+- name: Report pending count
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ patch_pending | length }} pending
+      ({{ patch_pending_security | length }} security)
+      [mode={{ patch_mode }}]
+
+# ── Apply ─────────────────────────────────────────────────────────────────
+- name: Hold pinned packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ apt_hold_packages }}"
+  become: true
+  when:
+    - apt_hold_packages | length > 0
+    - patch_mode != 'audit'
+
+- name: Upgrade packages
+  ansible.builtin.apt:
+    upgrade: "{{ apt_upgrade_type }}"
+    lock_timeout: "{{ apt_lock_timeout }}"
+    dpkg_options: 'force-confdef,force-confold'
+  become: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    NEEDRESTART_MODE: a          # auto-restart services, never prompt
+    NEEDRESTART_SUSPEND: "1"
+  register: patch_upgrade
+  when:
+    - patch_mode != 'audit'
+    - patch_pending | length > 0
+
+- name: Remove orphaned packages
+  ansible.builtin.apt:
+    autoremove: true
+    purge: false
+    lock_timeout: "{{ apt_lock_timeout }}"
+  become: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when:
+    - patch_mode != 'audit'
+    - apt_autoremove | bool
+
+- name: Clean the local package archive
+  ansible.builtin.apt:
+    autoclean: true
+    lock_timeout: "{{ apt_lock_timeout }}"
+  become: true
+  when:
+    - patch_mode != 'audit'
+    - apt_autoclean | bool
+
+# ── Does it need a reboot? ────────────────────────────────────────────────
+- name: Check for reboot-required flag
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: patch_reboot_flag
+
+- name: Read packages that triggered the reboot requirement
+  ansible.builtin.slurp:
+    src: /var/run/reboot-required.pkgs
+  register: patch_reboot_pkgs_raw
+  failed_when: false
+  when: patch_reboot_flag.stat.exists
+
+- name: Record patch results
+  ansible.builtin.set_fact:
+    patch_reboot_required: "{{ patch_reboot_flag.stat.exists }}"
+    patch_reboot_packages: >-
+      {{ (patch_reboot_pkgs_raw.content | default('') | b64decode).split('\n')
+         | select('!=', '') | unique | list
+         if patch_reboot_flag.stat.exists else [] }}
+    patch_changed: "{{ patch_upgrade.changed | default(false) }}"
+    patch_upgraded_count: >-
+      {{ patch_pending | length if (patch_upgrade.changed | default(false)) else 0 }}
