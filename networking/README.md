@@ -70,8 +70,9 @@ prefix in the peer's `AllowedIPs`. FRR sees these as `K` routes with distance 0,
 which beats every protocol. The inter-site path is therefore effectively
 static, and the OSPF and BGP routes below are learned but **not installed**
 (`show ip route summary` → `ospf 6, FIB 0`). Handing forwarding to FRR (the
-WireGuard *Disable routes* option) is on the roadmap. See
-[bgp-fix-2026-10.md](bgp-fix-2026-10.md).
+WireGuard *Disable routes* option) is planned. See
+[bgp-fix-2026-10.md](bgp-fix-2026-10.md) for how this was found, and the
+**[cutover runbook](runbooks/bgp-forwarding-cutover.md)** for the plan.
 
 ### OSPF
 

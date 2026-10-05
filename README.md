@@ -69,7 +69,8 @@ I'd rather show where the lab is imperfect than pretend it isn't:
   with no session reset; making it permanent in the GUI is pending.
   [Case study](networking/bgp-fix-2026-10.md)
 - **Neither OSPF nor BGP forwards traffic yet.** WireGuard's own kernel routes
-  (distance 0) win. Handing forwarding to FRR is a planned maintenance-window change.
+  (distance 0) win. Handing forwarding to BGP is a planned change:
+  [runbook](networking/runbooks/bgp-forwarding-cutover.md).
   [Details](networking/README.md#known-issues-found-while-writing-this-up)
 - **OSPF `area range` / `filter-list` are inert** in a single-area design.
 - **BFD is enabled with no peers**, so failover takes ~40 s on OSPF timers.
