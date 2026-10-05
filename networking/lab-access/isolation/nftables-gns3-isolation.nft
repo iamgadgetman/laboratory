@@ -1,0 +1,13 @@
+# Loaded by gns3-lab-isolation.service on the GNS3 host.
+# The lab's own egress (lab ISP -> host libvirt NAT bridge) must not be able to
+# open connections into production. Priority -10 runs before both libvirt's and
+# Docker's forward rules, so neither can ACCEPT the traffic first.
+# The first two lines make the file idempotent (create-if-missing, then replace).
+table inet gns3_isolation
+delete table inet gns3_isolation
+table inet gns3_isolation {
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    iifname "virbr0" ip daddr { 10.20.0.0/22, 10.40.0.0/22, 10.99.0.0/16, 10.255.0.0/24 } ct state new counter drop comment "GNS3 lab may not open connections into production"
+  }
+}

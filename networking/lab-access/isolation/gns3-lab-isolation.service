@@ -1,0 +1,13 @@
+[Unit]
+Description=Stop the GNS3 lab (virbr0) opening connections into production
+After=network-pre.target
+Before=libvirtd.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables-gns3-isolation.nft
+ExecStop=/usr/sbin/nft delete table inet gns3_isolation
+
+[Install]
+WantedBy=multi-user.target

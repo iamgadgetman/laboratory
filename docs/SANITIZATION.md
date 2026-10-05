@@ -12,6 +12,10 @@ actual addresses do not.
 | Inter-site WireGuard transit | `10.99.0.0/29` (Hawk `.1`, Fort `.2`) |
 | Cloud VPS WireGuard hub | `10.99.1.0/24` |
 | Router loopbacks / router-IDs | `10.255.0.1` (Hawk), `10.255.0.2` (Fort) |
+| GNS3 lab — mirror of The Fort | `10.140.0.0/22` (`10.140.0-3.x`, last octets preserved) |
+| GNS3 lab — mirror of Hawk House | `10.120.0.0/22` (`10.120.0-3.x`) |
+| GNS3 lab simulated internet | `10.200.0.0/24` (host bridge `.1`) |
+| ISP router LAN (real Fort WAN segment, mirrored in the lab) | `10.201.0.0/24` |
 | Public WAN addresses | RFC 5737: Hawk `198.51.100.20`, Fort `203.0.113.10`, VPS `192.0.2.50` |
 | Primary domain | `example.net` (`hawk.example.net`, `fort.example.net`) |
 | Secondary domain | `example.org` |

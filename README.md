@@ -41,7 +41,7 @@ Full diagrams: [diagrams/topology.md](diagrams/topology.md)
 
 | Folder | What it shows |
 |---|---|
-| [`networking/`](networking/) | Addressing plan, WireGuard site-to-site, **OSPF over WireGuard (NBMA)**, **eBGP between loopbacks**, DDNS behind double NAT, live FRR configs, a DDNS incident write-up |
+| [`networking/`](networking/) | Addressing plan, WireGuard site-to-site, **OSPF over WireGuard (NBMA)**, **eBGP between loopbacks**, DDNS behind double NAT, live FRR configs, a DDNS incident write-up, and **routed one-way access into an isolated GNS3 lab** ([lab-access](networking/lab-access/)) |
 | [`monitoring/`](monitoring/) | Prometheus scrape design (~30 jobs / ~175 targets), alert rules, Grafana, VictoriaLogs, alert delivery to phone via self-hosted ntfy |
 | [`automation/`](automation/) | Ansible fleet patching (audit → patch → staged reboots on systemd timers), Ansible-built Docker Swarm, Cloudflare DNS-failover watchdog, n8n workflows (AI job-application document generator, game-server update sweep) |
 | [`diagrams/`](diagrams/) | Mermaid topology, routing control plane, WAN-change sequence |
@@ -55,6 +55,7 @@ Full diagrams: [diagrams/topology.md](diagrams/topology.md)
 | Dynamic routing: OSPF network types, passive interfaces, eBGP multihop, peer groups, prefix-lists and route-maps, dynamic neighbors | [networking/README.md](networking/README.md#routing-ospf-underlay-ebgp-between-loopbacks), [networking/frr/](networking/frr/) |
 | Site-to-site VPN design: WireGuard cryptokey routing as a second policy layer, NAT keepalives, MTU | [networking/README.md](networking/README.md#inter-site-transport-wireguard) |
 | Segmentation and addressing: per-site /22 split into zones, consistent `.100` gateways, split-horizon DNS | [networking/README.md](networking/README.md#addressing-plan) |
+| Lab isolation: one-way NAT border, static routing with overlapping address plans, nftables priority vs libvirt/Docker iptables ordering | [networking/lab-access/](networking/lab-access/) |
 | Troubleshooting method: measure, find the second fault behind the first, record the wrong guess | [networking/ddns/README.md](networking/ddns/README.md) |
 | Observability: exporter selection, blackbox from two vantage points, alerting that reaches a human | [monitoring/README.md](monitoring/README.md) |
 | Infrastructure as code: Ansible roles, staged reboots, systemd timers, safe-by-default modes | [automation/README.md](automation/README.md) |

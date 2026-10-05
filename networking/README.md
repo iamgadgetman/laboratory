@@ -171,6 +171,12 @@ dead address. Moving both to resolve `fort.example.net` is on the roadmap.
 - **Reverse proxy:** Traefik at each site with Cloudflare DNS-01 ACME, and
   Authentik SSO in front of most services.
 
+## Lab access
+
+A GNS3 replica of both sites is reachable from production through a one-way
+NAT border, with no shared routing and no path back. Design, the leak it
+uncovered, and the nftables fix: [lab-access/](lab-access/).
+
 ## Verification cheat-sheet
 
 ```sh
