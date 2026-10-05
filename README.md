@@ -64,9 +64,12 @@ Full diagrams: [diagrams/topology.md](diagrams/topology.md)
 
 I'd rather show where the lab is imperfect than pretend it isn't:
 
-- **BGP is established but carries no prefixes.** The outbound prefix-list and
-  route-map have no overlap. OSPF currently does all the work. Next step: decide
-  which protocol is authoritative, then fix the policy.
+- **Fixed: a BGP session that was up but carried nothing.** OPNsense's OSPF and
+  BGP pages shared object names, and FRR let one overwrite the other. Fixed live
+  with no session reset; making it permanent in the GUI is pending.
+  [Case study](networking/bgp-fix-2026-10.md)
+- **Neither OSPF nor BGP forwards traffic yet.** WireGuard's own kernel routes
+  (distance 0) win. Handing forwarding to FRR is a planned maintenance-window change.
   [Details](networking/README.md#known-issues-found-while-writing-this-up)
 - **OSPF `area range` / `filter-list` are inert** in a single-area design.
 - **BFD is enabled with no peers**, so failover takes ~40 s on OSPF timers.

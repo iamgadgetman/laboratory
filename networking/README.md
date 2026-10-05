@@ -63,7 +63,17 @@ equivalent, for readability.
 Configs: [`frr/fort-frr.conf`](frr/fort-frr.conf) and
 [`frr/hawk-frr.conf`](frr/hawk-frr.conf), captured live and sanitized.
 
-### OSPF (what actually carries traffic today)
+### What actually forwards traffic: WireGuard's kernel routes
+
+Measured 2026-10-04: OPNsense's WireGuard installs a kernel route for every
+prefix in the peer's `AllowedIPs`. FRR sees these as `K` routes with distance 0,
+which beats every protocol. The inter-site path is therefore effectively
+static, and the OSPF and BGP routes below are learned but **not installed**
+(`show ip route summary` → `ospf 6, FIB 0`). Handing forwarding to FRR (the
+WireGuard *Disable routes* option) is on the roadmap. See
+[bgp-fix-2026-10.md](bgp-fix-2026-10.md).
+
+### OSPF
 
 - Single area 0. Each site advertises its four /24s, its loopback and its
   tunnel addresses.
@@ -107,21 +117,19 @@ O   10.255.0.1/32 [110/10] via 10.99.0.1, wg0 onlink, 4d09h25m
 halt# show bgp summary
 BGP router identifier 10.255.0.2, local AS number 65552
 Neighbor     V   AS    MsgRcvd MsgSent  Up/Down  State/PfxRcd PfxSnt Desc
-10.255.0.1   4 65551     25746   25747 4d09h24m             0      0 hawk
+10.255.0.1   4 65551     25979   25981 4d13h07m             4      4 hawk
 ```
 
 ### Known issues (found while writing this up)
 
-1. **The BGP session is up but exchanges zero prefixes.** On the outbound side,
-   each neighbor has *both* a `prefix-list … out` that permits only that site's
-   /24s *and* a `route-map … out` that permits only loopbacks and tunnel
-   prefixes. A route has to pass both filters, and no prefix is in both, so
-   nothing is advertised. The inbound side has the same shape.
-2. **Decide which protocol should win before fixing (1).** If BGP starts
-   carrying the site /24s, eBGP's administrative distance (20) beats OSPF's (110),
-   and the BGP routes take over. Options: keep OSPF as the reachability source
-   and use BGP only for policy (raise BGP's distance), or make BGP primary and
-   shrink OSPF to loopbacks and transit only.
+1. ~~**The BGP session was up but exchanged zero prefixes.**~~ **Fixed live
+   2026-10-04, now 4/4 each way.** Cause: OPNsense's OSPF and BGP pages defined
+   route-maps and prefix-lists with the same names, and FRR's single namespace
+   let one set overwrite the other. Full write-up:
+   [bgp-fix-2026-10.md](bgp-fix-2026-10.md). Still to do: make it permanent in
+   the GUI by renaming the colliding OSPF objects.
+2. **BGP distance is raised to 200**, so BGP routes stay standby below OSPF.
+   (In practice WireGuard's kernel routes win over both; see above.)
 3. **`bfd` is enabled with no peers**, so failure detection falls back to OSPF's
    dead interval (~40 s). Adding BFD on the OSPF neighbor is the obvious next step.
 4. **The OSPF summarization and filtering are inert.** `area range` and
